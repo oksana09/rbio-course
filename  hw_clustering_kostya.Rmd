@@ -1,0 +1,143 @@
+---
+title: "hw_clustering for Mr. Konstantin"
+author: "Оксана Владимировна Айзсилниекс"
+date: "07 04 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Используемые пакеты
+
+```{r, message=FALSE, warning=FALSE}
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(amap)
+library(dbscan)
+library(dplyr)
+options(width=120)
+```
+
+# Задание 1. Иерархическая кластеризация
+
+Создадим объект для кластеризации путем некоторых действий с deseq объектом. В матрице будут встречаться самые экспрессируемые 8000 генов. Вобщем-то, всё почти то же самое, что и в прошлой домашке. А с функцией hclust я знакома еще с момента кластеризации бактериологических высевов для отчета по инфекциям в НИИ ДОГиТ им. Р.М.Горбачевой. Трудность нижележащего кода состоит по большей части в получении нужной матрицы, которую мы затем подадим функции hclust.
+
+```{r, message=FALSE, warning=FALSE}
+counts <- read.csv("GSE89225_Illumina_counts.csv", row.names=1)
+
+conditions <- read.csv("conditions.csv", row.names=1)
+
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData =conditions,
+                              design = ~ tissue + cells)
+
+dds <- dds[rowSums(counts(dds)) > 20, ]
+dds <- head(dds, 8000)
+dds <- DESeq(dds)
+
+# вот эта трудность, но об assay я знаю из весеннего учебного проекта.
+dds_log_matr <- assay(rlog(dds))
+
+# определяем "похожесть" корреляцией между элементами матрицы
+cor_mtarix <- cor(dds_log_matr)
+
+# а "непоъожесть" путем вычитания матрицы из 1
+not_similar_cor <- 1-cor_mtarix
+
+# далее просто кластеризуем данные, используя различные методы ("complete", "average", "single"), и формируем кластерные дендрограммы
+
+hc_complete = hclust(dist(cor_mtarix), method = "complete")
+
+hc_average = hclust(dist(cor_mtarix), method = "average")
+
+plot(hc_complete)
+
+plot(hc_average)
+
+hc_single = hclust(dist(cor_mtarix), method = "single")
+
+plot(hc_single)
+
+
+```
+
+# Задание 2. K-means
+
+Теперь, в отличие от предыдущего задания, данные необходимо будет использовать без учета найденного аутлайера в предыдущем задании.
+
+```{r, message=FALSE, warning=FALSE}
+counts_k_m <- select(counts, -treg_NBP_patient3)
+
+conditions_k_m <- conditions[-12,]
+
+dds_k_m <- DESeqDataSetFromMatrix(countData = counts_k_m,
+                              colData =conditions_k_m,
+                              design = ~ tissue + cells)
+
+dds_k_m <- dds_k_m[rowSums(counts(dds_k_m)) > 20, ]
+
+# перед тем, как создать похожую матрицу, как в предыдущем задании, - сортируем ее по строчкам в порядке убывания
+dds_trans <- order(rowSums(counts(dds_k_m)), decreasing = TRUE)
+dds_k_m <- dds_k_m[dds_trans, ][1:8000,]
+
+# далее уже из отсортированных данных создадим deseq объект
+dds_k_m <- DESeq(dds_k_m)
+
+# получим желаемую матрицу
+
+dds_k_m_log <- assay(rlog(dds_k_m))
+
+# применим функцию Kmeans для выявления числа кластеров, снова используя как меру "похожести" корреляцию
+
+clustering_it <- Kmeans(dds_k_m_log, 6, method="correlation", iter.max=20000)
+
+head(clustering_it$cluster)
+
+# опять отсортируем матрицу как нам того хочется
+want_to_see <- dds_k_m_log[order(clustering_it$cluster), order(conditions_k_m$cells, conditions_k_m$tissue)]
+
+cluster <- as.data.frame(as.factor(clustering_it$cluster))
+
+# готовим данные для функции pheatmap также как делали в прошлом домашнем задании. Кстати, а почему нельзя просто применить функцию scale, приведя все к z-шкале?
+
+want_to_see <- t(apply(want_to_see, 1, function(r) {
+  (r - min(r)) / (max(r) - min(r))
+}))
+
+pheatmap(want_to_see, 
+         show_rownames = F, cluster_rows = F,
+         cluster_cols=F,
+         annotation_col = conditions_k_m,
+         annotation_row =  cluster)
+
+```
+
+# Задание 3. Знакомство с пакетом dbscan. 
+
+Знакомство осуществлено.
+
+```{r, message=FALSE, warning=FALSE}
+for_dbscan <- read.csv("projection.csv")
+
+no_clust <- ggplot(for_dbscan, aes(TSNE.1, TSNE.2)) +
+  ggtitle("No clustering") +
+  geom_point(size = 1) +
+  theme_bw()
+  
+what_clusters <- dbscan(for_dbscan[2:3], eps = 3)
+
+for_dbscan$clusters <- as.factor(what_clusters$cluster)
+
+ha_ha_i_clust <- ggplot(for_dbscan, aes(TSNE.1, TSNE.2, colour = clusters)) +
+  ggtitle("Yes, i can clust") +
+  theme_bw() + 
+  geom_point(size = 1) 
+
+no_clust
+ha_ha_i_clust
+
+```
+
