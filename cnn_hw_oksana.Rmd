@@ -1,0 +1,225 @@
+---
+title: "Neuronal_hea(u)rt_working"
+author: "Оксана Владимировна Айзсилниекс"
+date: "26 06 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+June 18, 2017
+
+###For Mr. Zaitsev some package to play
+
+```{r, warning=FALSE,message=FALSE}
+library(OpenImageR)
+library(mxnet)
+library(dplyr)
+```
+
+###Часть 1. Увеличение количества картинок
+
+Первой частью нашего задания будет искусственное увеличение датасета с помощью функции Augmentation в пакете OpenImageR: хочется взять и каждую картинку случайно повернуть и немного сдвинуть и проделать это где-то ~50 раз.
+
+Пример использования функции ниже:
+
+```{r, warning=FALSE,message=FALSE}
+# taken from https://stackoverflow.com/questions/22509106/converting-a-matrix-into-a-gray-scale-image-in-r
+grays = rgb(red = 0:255/255, blue = 0:255/255, green = 0:255/255)
+
+patch <- readImage("patches/patch1.jpg")
+image(patch, col=grays)
+```
+А ещё было бы неплохо применить ZCA whitening (подробнее можно почитать здесь https://en.wikipedia.org/wiki/Whitening_transformation) – это такое нормализующее преобразование, которое часто используется в обучении нейронных сетей.
+
+```{r, warning=FALSE,message=FALSE} 
+# ZCA only
+patchAugmented <- Augmentation(patch, zca_comps = 30, zca_epsilon = 0.1, threads = 1, verbose = F)
+image(patchAugmented, col=grays)
+```
+
+###ZCA only + flip
+
+```{r, warning=FALSE,message=FALSE} 
+# ZCA only + flip
+patchAugmented <- Augmentation(patch, flip_mode = "horizontal",
+                                 zca_comps = 30, zca_epsilon = 0.1, threads = 1, verbose = F)
+image(patchAugmented, col=grays)
+```
+###ZCA only + flip + rotation 30 degrees counterclockwise
+
+```{r, warning=FALSE,message=FALSE} 
+# ZCA only + flip + rotation 30 degrees counterclockwise
+patchAugmented <- Augmentation(patch, flip_mode = "horizontal", 
+             rotate_angle = 30, rotate_method = 'bilinear', 
+             zca_comps = 30,zca_epsilon = 0.1, threads = 1, verbose = F)
+image(patchAugmented, col=grays)
+```
+###ZCA only + flip + rotation 30 degrees counterclockwise + shift 10 pixels comlumns and 5 pixels rows
+
+```{r, warning=FALSE,message=FALSE} 
+# ZCA only + flip + rotation 30 degrees counterclockwise + shift 10 pixels comlumns and 5 pixels rows
+patchAugmented <- Augmentation(patch, flip_mode = "horizontal",
+             shift_cols = 10, shift_rows = 5,
+             rotate_angle = 30, rotate_method = 'bilinear', 
+             zca_comps = 30,zca_epsilon = 0.1, threads = 1, verbose = F)
+image(patchAugmented, col=grays)
+```
+
+###Данные
+В папке patches лежат маленькие картинки – части изображений легких. В папке slices лежат изорабражения срезов легких целиком. В файле patch_labels.csv лежит 168 чисел от 0 до 2: 0 for normal tissue (NT), 1 for centrilobular emphysema (CLE), 2 for paraseptal emphysema (PSE), описывает класс каждого изображения из папки patches. Вообще все эти слайсы и патчи от реальных пациентов, и там есть файлики, которые описывают это всё дело, но нас в этой работе будут интересовать только patches и patch_labels.
+
+###Preparing data
+
+```{r warning=FALSE,message=FALSE}
+data_patch_labels <- read.csv("patch_labels.csv", header = F)
+data_patch_labels <- rename(data_patch_labels, 
+                   patch_labels = V1)
+
+data_patch_subjects <- read.csv("patch_subjects.csv", header = F)
+data_patch_subjects <- rename(data_patch_subjects, 
+                   patch_subjects = V1)
+
+data_patch_labels$subjects <- data_patch_subjects$patch_subjects
+data_patch_labels$file_name <- c(1:168)
+data_patch_labels$file_name <- sub("^", "patch", data_patch_labels$file_name)
+data_patch_labels$file_name <- paste0(data_patch_labels$file_name, ".jpg")
+
+dataFiles <- as.character(data_patch_labels$file_name)
+head(data_patch_labels)
+```
+
+Хочется взять разбить 168 картинок на тренировочную и тестирущие выборки: 34 в тестирующей и 134 в тренировочной. Тогда воспользуемся результатами предыдущего шага 134×50 картинок – тренировочная выборка, 34×50 – тестирующая. Хочется обучить нейронную сеть, как мы делали на паре. Мы сделал ремарку, что разбивать а валидирующий и тренировочный датасеты лучше до амплификации. Сделаем же это.
+
+```{r warning=FALSE,message=FALSE}
+data <- head(data_patch_labels, 168)
+
+dataset.size <- 168
+training.size <- floor(0.8 * dataset.size)
+validation.size <- dataset.size - training.size
+training.set <- sample(1:dataset.size, training.size)
+validation.set <- (1:dataset.size)[-training.set]
+
+train <- data[training.set, ]
+test <- data[validation.set, ]
+
+dim(train)
+dim(test)
+
+```
+
+Преобразуем данные, только, в отличие от случая в лекции, картинку мы будем не поворачивать, а применять к ней те преобразования, которые ты предложил в начале домашнего задания.
+
+```{r warning=FALSE,message=FALSE}
+# for train
+
+data.dims <- dim(train)
+features <- 61 * 61
+dataset.size <- 50 * data.dims[1]
+nn.data.x <- matrix(0, nrow=dataset.size, ncol=features)
+nn.data.y <- vector(length=dataset.size)
+rotate_angle <- seq(0, 359, 72)
+pixel_shift <- seq(-5, 4, 1)
+array_tranform <- expand.grid(rotate_angle, pixel_shift)
+
+for (i in 1:data.dims[1]) {
+  print(i)
+  image <- as.character(train[i, ]$file_name)
+  image <- readImage(sprintf("patches/%s", image))
+  for (j in 1:50) {
+    patchAugmented <- Augmentation(image, flip_mode = "horizontal",
+             shift_cols = array_tranform[j,2], shift_rows = array_tranform[j,2],
+             rotate_angle = array_tranform[j,1], rotate_method = 'bilinear', 
+             zca_comps = 30,zca_epsilon = 0.1, threads = 1, verbose = F)
+    image(patchAugmented, col=grays)
+    nn.data.x[(i - 1) * 50 + j, ] <- as.numeric(patchAugmented)
+    nn.data.y[(i - 1) * 50 + j] <- train[i, ]$patch_labels
+  }
+}
+
+# for test
+
+data.dims_test <- dim(test)
+features_test <- 61 * 61
+dataset.size_test <- 50 * data.dims_test[1]
+nn.data.x_test <- matrix(0, nrow=dataset.size_test, ncol=features_test)
+nn.data.y_test <- vector(length=dataset.size_test)
+rotate_angle <- seq(0, 359, 72)
+pixel_shift <- seq(-5, 4, 1)
+array_tranform <- expand.grid(rotate_angle, pixel_shift)
+
+for (i in 1:data.dims_test[1]) {
+  print(i)
+  image <- as.character(test[i, ]$file_name)
+  image <- readImage(sprintf("patches/%s", image))
+  for (j in 1:50) {
+    patchAugmented <- Augmentation(image, flip_mode = "horizontal",
+             shift_cols = array_tranform[j,2], shift_rows = array_tranform[j,2],
+             rotate_angle = array_tranform[j,1], rotate_method = 'bilinear', 
+             zca_comps = 30,zca_epsilon = 0.1, threads = 1, verbose = F)
+    image(patchAugmented, col=grays)
+    
+    if ( (i - 1) * 50 + j == 1 ){
+      print(patchAugmented)
+      print(as.numeric(patchAugmented))
+    }
+    nn.data.x_test[(i - 1) * 50 + j, ] <- as.numeric(patchAugmented)
+    nn.data.y_test[(i - 1) * 50 + j] <- test[i, ]$patch_labels
+  }
+}
+
+```
+
+###Часть вторая
+
+Я предлагаю использовать следующую архитектуру, но вы можете выбрать свою. Архитектура указанная ниже достаточно неплохо обучается (70% accuracy на train, 100% на test).
+
+```{r warning=FALSE,message=FALSE}
+train.array <- t(nn.data.x)
+dim(train.array) <- c(61, 61, 1, ncol(train.array))
+test.array <- t(nn.data.x_test)
+dim(test.array) <- c(61, 61, 1, ncol(test.array))
+
+data <- mx.symbol.Variable('data')
+
+conv.1 <- mx.symbol.Convolution(data = data, kernel = c(5, 5), num_filter = 10)
+tanh.1 <- mx.symbol.LeakyReLU(conv.1, slope=0)
+pool.1 <- mx.symbol.Pooling(data=tanh.1, kernel=c(2, 2), stride=c(2, 2), pool.type="max")
+
+conv.2 <- mx.symbol.Convolution(data = pool.1, kernel = c(5, 5), num_filter = 10)
+tanh.2 <- mx.symbol.LeakyReLU(conv.2, slope=0)
+pool.2 <- mx.symbol.Pooling(data=tanh.2, kernel=c(2, 2), stride=c(2, 2), pool.type="max")
+
+fc.1 <- mx.symbol.FullyConnected(data = pool.2, num_hidden = 3)
+
+nn.model <- mx.symbol.SoftmaxOutput(data = fc.1)
+
+graph.viz(nn.model)
+
+mx.set.seed(1)
+model <- mx.model.FeedForward.create(nn.model, 
+                                     X=train.array, 
+                                     y=as.array(nn.data.y-1),
+                                     eval.data = list(
+                                       data=test.array,
+                                       label=as.array(nn.data.y_test-1)
+                                     ),
+                                     ctx=mx.cpu(), 
+                                     num.round = 100,
+                                     optimizer="adadelta",
+                                     eval.metric = mx.metric.accuracy,
+                                     epoch.end.callback = mx.callback.log.train.metric(10))
+
+soft_preds <- predict(model, test.array)
+preds <- apply(preds,2, which.max )
+
+M = matrix(0,3,3)
+
+for (i in 1:length(preds)){
+  M[nn.data.y_test[i], preds[i] <- M[nn.data.y_test[i], preds[i]] + 1
+}
+
+print(M)
+```
